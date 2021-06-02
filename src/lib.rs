@@ -36,9 +36,9 @@ pub trait Daemon {
     /// What the daemon does when it runs
     async fn run(&self, data: &Self::Data) -> ControlFlow;
     /// How frequent the daemon must run
-    fn interval(&self) -> Duration;
+    async fn interval(&self) -> Duration;
     /// The name of the daemon
-    fn name(&self) -> String;
+    async fn name(&self) -> String;
 }
 
 pub struct DaemonThread<Data> {
@@ -70,12 +70,12 @@ impl<D: Send + Sync + 'static> DaemonThread<D> {
     {
         let id = self.next_id;
         let (sx, mut rx) = mpsc::channel(10);
-        self.channels.insert(id, (daemon.name(), sx));
+        self.channels.insert(id, (daemon.name().await, sx));
         let data = self.data.clone();
         tokio::spawn(async move {
             loop {
                 let now = Instant::now();
-                let next_run = now + daemon.interval();
+                let next_run = now + daemon.interval().await;
                 let _ = timeout(next_run - now, rx.recv()).await;
 
                 if daemon.run(&data).await.must_break() {
