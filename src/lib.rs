@@ -1,5 +1,7 @@
 #![deny(unused_crate_dependencies)]
 #![deny(rust_2018_idioms)]
+#![deny(unsafe_code)]
+#![deny(unused_must_use)]
 
 use std::{
     collections::HashMap,
