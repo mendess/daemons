@@ -3,12 +3,14 @@
 
 use std::{
     collections::HashMap,
-    error::Error,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::mpsc::{self, Sender},
+    sync::{
+        mpsc::{self, Sender},
+        Mutex,
+    },
     time::timeout,
 };
 
@@ -34,7 +36,7 @@ pub trait Daemon {
     type Data;
 
     /// What the daemon does when it runs
-    async fn run(&self, data: &Self::Data) -> ControlFlow;
+    async fn run(&mut self, data: &Self::Data) -> ControlFlow;
     /// How frequent the daemon must run
     async fn interval(&self) -> Duration;
     /// The name of the daemon
@@ -63,9 +65,8 @@ impl<D: Send + Sync + 'static> DaemonThread<D> {
         Ok(())
     }
 
-    pub async fn add_daemon<E, T>(&mut self, daemon: T) -> usize
+    pub async fn add_daemon<T>(&mut self, mut daemon: T) -> usize
     where
-        E: Error + 'static,
         T: Daemon<Data = D> + Send + Sync + 'static,
     {
         let id = self.next_id;
@@ -87,8 +88,32 @@ impl<D: Send + Sync + 'static> DaemonThread<D> {
         id
     }
 
-    pub fn daemon_names(&self) -> impl Iterator<Item = &str> {
-        self.channels.values().map(|(n, _)| n.as_str())
+    pub async fn add_shared<T>(&mut self, daemon: Arc<Mutex<T>>) -> usize
+    where
+        T: Daemon<Data = D> + Send + Sync + 'static,
+    {
+        let id = self.next_id;
+        let (sx, mut rx) = mpsc::channel(10);
+        self.channels
+            .insert(id, (daemon.lock().await.name().await, sx));
+        let data = self.data.clone();
+        tokio::spawn(async move {
+            loop {
+                let now = Instant::now();
+                let next_run = now + daemon.lock().await.interval().await;
+                let _ = timeout(next_run - now, rx.recv()).await;
+
+                if daemon.lock().await.run(&data).await.must_break() {
+                    break;
+                }
+            }
+        });
+        self.next_id += 1;
+        id
+    }
+
+    pub fn daemon_names(&self) -> impl Iterator<Item = (usize, &str)> {
+        self.channels.iter().map(|(i, (n, _))| (*i, n.as_str()))
     }
 
     pub fn start(data: Arc<D>) -> Self {

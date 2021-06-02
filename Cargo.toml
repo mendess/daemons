@@ -1,6 +1,6 @@
 [package]
 name = "daemons"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["mendess <pedro.mendes.26@gmail.com>"]
 edition = "2018"
 
