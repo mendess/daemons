@@ -121,13 +121,18 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
         self.channels.insert(id.0, (daemon.name().await, sx));
         let data = self.data.clone();
         tokio::spawn(async move {
+            let mut last_run = Instant::now();
             loop {
-                let now = Instant::now();
-                let next_run = now + daemon.interval().await;
-                //TODO: or patterns
-                if let Ok(Some(Msg::Cancel)) | Ok(None) = timeout(next_run - now, rx.recv()).await
-                {
-                    break;
+                let interval = daemon
+                    .interval()
+                    .await
+                    .checked_sub(Instant::now() - last_run)
+                    .unwrap_or_default();
+                match timeout(interval, rx.recv()).await {
+                    //TODO: or patterns
+                    Ok(Some(Msg::Cancel)) | Ok(None) => break,
+                    Ok(Some(Msg::Run)) => (),
+                    Err(_) => last_run = Instant::now(),
                 }
 
                 if daemon.run(&data).await.is_break() {
@@ -150,12 +155,20 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
             .insert(id.0, (daemon.lock().await.name().await, sx));
         let data = self.data.clone();
         tokio::spawn(async move {
+            let mut last_run = Instant::now();
             loop {
-                let now = Instant::now();
-                let next_run = now + daemon.lock().await.interval().await;
-                if let Ok(Some(Msg::Cancel)) | Ok(None) = timeout(next_run - now, rx.recv()).await
-                {
-                    break;
+                let interval = daemon
+                    .lock()
+                    .await
+                    .interval()
+                    .await
+                    .checked_sub(Instant::now() - last_run)
+                    .unwrap_or_default();
+                match timeout(interval, rx.recv()).await {
+                    //TODO: or patterns
+                    Ok(Some(Msg::Cancel)) | Ok(None) => break,
+                    Ok(Some(Msg::Run)) => (),
+                    Err(_) => last_run = Instant::now(),
                 }
 
                 if daemon.lock().await.run(&data).await.is_break() {
