@@ -59,13 +59,13 @@ enum Msg {
 
 /// A daemon thread handle used to spawn more daemons or to force daemons to run at arbitrary times
 #[derive(Debug)]
-pub struct DaemonThread<Data> {
+pub struct DaemonManager<Data> {
     next_id: Wrapping<usize>,
     channels: HashMap<usize, (String, Sender<Msg>)>,
     data: Arc<Data>,
 }
 
-impl<D: Send + Sync + 'static> DaemonThread<D> {
+impl<D: Send + Sync + 'static> DaemonManager<D> {
     async fn send_msg(&mut self, i: usize, msg: Msg) -> Result<(), usize> {
         match OptFut::from(self.channels.get(&i).map(|(_, c)| c.send(msg))).await {
             Some(Ok(_)) => Ok(()),
@@ -182,7 +182,7 @@ impl<D: Send + Sync + 'static> DaemonThread<D> {
     }
 }
 
-impl<D: Send + Sync + 'static> From<Arc<D>> for DaemonThread<D> {
+impl<D: Send + Sync + 'static> From<Arc<D>> for DaemonManager<D> {
     fn from(data: Arc<D>) -> Self {
         Self {
             next_id: Wrapping(0),
