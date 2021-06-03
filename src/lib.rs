@@ -59,25 +59,40 @@ pub struct DaemonThread<Data> {
 }
 
 impl<D: Send + Sync + 'static> DaemonThread<D> {
-    pub async fn run_one(&mut self, i: usize) -> Result<(), usize> {
-        match OptFut::from(self.channels.get(&i).map(|(_, c)| c.send(Msg::Run))).await {
+    async fn send_msg(&mut self, i: usize, msg: Msg) -> Result<(), usize> {
+        match OptFut::from(self.channels.get(&i).map(|(_, c)| c.send(msg))).await {
             Some(Ok(_)) => Ok(()),
-            _ => Err(i),
+            e => {
+                if e.is_some() {
+                    self.channels.remove(&i);
+                }
+                Err(i)
+            }
         }
     }
 
-    pub async fn run_all(&mut self) -> Result<(), usize> {
-        for (i, (_, c)) in self.channels.iter() {
-            c.send(Msg::Run).await.map_err(|_| *i)?
-        }
-        Ok(())
+    pub async fn run_one(&mut self, i: usize) -> Result<(), usize> {
+        self.send_msg(i, Msg::Run).await
     }
 
     pub async fn cancel(&mut self, i: usize) -> Result<(), usize> {
-        if let None = OptFut::from(self.channels.get(&i).map(|(_, c)| c.send(Msg::Cancel))).await {
-            Err(i)
-        } else {
+        self.send_msg(i, Msg::Cancel).await
+    }
+
+    pub async fn run_all(&mut self) -> Result<(), Vec<usize>> {
+        let mut failed = Vec::new();
+        for (i, (_, c)) in self.channels.iter() {
+            if let Err(_) = c.send(Msg::Run).await {
+                failed.push(*i)
+            }
+        }
+        if failed.is_empty() {
             Ok(())
+        } else {
+            failed.iter().for_each(|i| {
+                self.channels.remove(&i);
+            });
+            Err(failed)
         }
     }
 
@@ -121,7 +136,10 @@ impl<D: Send + Sync + 'static> DaemonThread<D> {
             loop {
                 let now = Instant::now();
                 let next_run = now + daemon.lock().await.interval().await;
-                let _ = timeout(next_run - now, rx.recv()).await;
+                if let Ok(Some(Msg::Cancel)) | Ok(None) = timeout(next_run - now, rx.recv()).await
+                {
+                    break;
+                }
 
                 if daemon.lock().await.run(&data).await.is_break() {
                     break;
@@ -133,10 +151,13 @@ impl<D: Send + Sync + 'static> DaemonThread<D> {
     }
 
     pub fn daemon_names(&self) -> impl Iterator<Item = (usize, &str)> {
-        self.channels.iter().map(|(i, (n, _))| (*i, n.as_str()))
+        self.channels
+            .iter()
+            .filter(|(_, (_, s))| !s.is_closed())
+            .map(|(i, (n, _))| (*i, n.as_str()))
     }
 
-    pub fn start(data: Arc<D>) -> Self {
+    pub fn spawn(data: Arc<D>) -> Self {
         data.into()
     }
 }
