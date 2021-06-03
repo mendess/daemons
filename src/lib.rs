@@ -18,23 +18,27 @@ use tokio::{
     time::timeout,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Used to tell a daemon whether it has to quit or continue
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ControlFlow {
     Continue,
     Break,
 }
 
 impl ControlFlow {
+    /// Is break
     pub fn is_break(self) -> bool {
         self == ControlFlow::Break
     }
 
+    /// Is continue
     pub fn is_continue(self) -> bool {
         !self.is_break()
     }
 }
 
-/// A Daemon
+/// A Daemon, daemons run at specified intervals (or when asked to) until they return
+/// [ControlFlow::Break].
 #[async_trait::async_trait]
 pub trait Daemon {
     type Data;
@@ -47,11 +51,14 @@ pub trait Daemon {
     async fn name(&self) -> String;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Msg {
     Run,
     Cancel,
 }
 
+/// A daemon thread handle used to spawn more daemons or to force daemons to run at arbitrary times
+#[derive(Debug)]
 pub struct DaemonThread<Data> {
     next_id: Wrapping<usize>,
     channels: HashMap<usize, (String, Sender<Msg>)>,
@@ -71,31 +78,40 @@ impl<D: Send + Sync + 'static> DaemonThread<D> {
         }
     }
 
+    /// Run daemon of id `i` now.
+    ///
+    /// # Errors
+    /// If the passed daemon is not running, the passed id is returned
     pub async fn run_one(&mut self, i: usize) -> Result<(), usize> {
         self.send_msg(i, Msg::Run).await
     }
 
+    /// Cancel a daemon, removing it from the pool of daemons.
+    ///
+    /// Canceling a daemon more than once is a no op.
+    ///
+    /// # Errors
+    /// If the passed daemon is not running, the passed id is returned
     pub async fn cancel(&mut self, i: usize) -> Result<(), usize> {
-        self.send_msg(i, Msg::Cancel).await
+        self.send_msg(i, Msg::Cancel).await?;
+        self.channels.remove(&i);
+        Ok(())
     }
 
-    pub async fn run_all(&mut self) -> Result<(), Vec<usize>> {
+    /// Run all daemons now
+    pub async fn run_all(&mut self) {
         let mut failed = Vec::new();
         for (i, (_, c)) in self.channels.iter() {
             if let Err(_) = c.send(Msg::Run).await {
                 failed.push(*i)
             }
         }
-        if failed.is_empty() {
-            Ok(())
-        } else {
-            failed.iter().for_each(|i| {
-                self.channels.remove(&i);
-            });
-            Err(failed)
-        }
+        failed.iter().for_each(|i| {
+            self.channels.remove(&i);
+        });
     }
 
+    /// Start a new daemon
     pub async fn add_daemon<T>(&mut self, mut daemon: T) -> usize
     where
         T: Daemon<Data = D> + Send + Sync + 'static,
@@ -123,6 +139,7 @@ impl<D: Send + Sync + 'static> DaemonThread<D> {
         id.0
     }
 
+    /// Start a new daemon, that is wrapped in an `Arc<Mutex<>>`
     pub async fn add_shared<T>(&mut self, daemon: Arc<Mutex<T>>) -> usize
     where
         T: Daemon<Data = D> + Send + Sync + 'static,
@@ -150,6 +167,7 @@ impl<D: Send + Sync + 'static> DaemonThread<D> {
         id.0
     }
 
+    /// List all names of all running daemons
     pub fn daemon_names(&self) -> impl Iterator<Item = (usize, &str)> {
         self.channels
             .iter()
@@ -157,6 +175,8 @@ impl<D: Send + Sync + 'static> DaemonThread<D> {
             .map(|(i, (n, _))| (*i, n.as_str()))
     }
 
+    /// Create a daemon thread, this doesn't start task, it simply converts the data object
+    /// into a [Self]
     pub fn spawn(data: Arc<D>) -> Self {
         data.into()
     }
