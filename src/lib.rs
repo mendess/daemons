@@ -3,6 +3,8 @@
 #![deny(unsafe_code)]
 #![deny(unused_must_use)]
 
+mod monomorphise;
+
 use futures::future::OptionFuture as OptFut;
 use std::{
     collections::HashMap,
