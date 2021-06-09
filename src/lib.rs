@@ -7,6 +7,7 @@ mod monomorphise;
 
 use futures::future::OptionFuture as OptFut;
 use std::{
+    any::TypeId,
     collections::HashMap,
     num::Wrapping,
     sync::Arc,
@@ -63,13 +64,39 @@ enum Msg {
 #[derive(Debug)]
 pub struct DaemonManager<Data> {
     next_id: Wrapping<usize>,
-    channels: HashMap<usize, (String, Sender<Msg>)>,
+    channels: HashMap<usize, DaemonHandle>,
     data: Arc<Data>,
+}
+
+/// A daemon handle, this will provide the name and the original type id of the associated daemon
+#[derive(Debug)]
+pub struct DaemonHandle {
+    name: String,
+    ch: Sender<Msg>,
+    ty: TypeId,
+}
+
+impl DaemonHandle {
+    fn new<T: 'static>(name: String, ch: Sender<Msg>) -> Self {
+        Self {
+            name,
+            ch,
+            ty: TypeId::of::<T>(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn ty(&self) -> TypeId {
+        self.ty
+    }
 }
 
 impl<D: Send + Sync + 'static> DaemonManager<D> {
     async fn send_msg(&mut self, i: usize, msg: Msg) -> Result<(), usize> {
-        match OptFut::from(self.channels.get(&i).map(|(_, c)| c.send(msg))).await {
+        match OptFut::from(self.channels.get(&i).map(|dhandle| dhandle.ch.send(msg))).await {
             Some(Ok(_)) => Ok(()),
             e => {
                 if e.is_some() {
@@ -103,8 +130,8 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
     /// Run all daemons now
     pub async fn run_all(&mut self) {
         let mut failed = Vec::new();
-        for (i, (_, c)) in self.channels.iter() {
-            if let Err(_) = c.send(Msg::Run).await {
+        for (i, dhandle) in self.channels.iter() {
+            if let Err(_) = dhandle.ch.send(Msg::Run).await {
                 failed.push(*i)
             }
         }
@@ -120,7 +147,8 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
     {
         let id = self.next_id;
         let (sx, mut rx) = mpsc::channel(10);
-        self.channels.insert(id.0, (daemon.name().await, sx));
+        self.channels
+            .insert(id.0, DaemonHandle::new::<T>(daemon.name().await, sx));
         let data = self.data.clone();
         tokio::spawn(async move {
             let mut last_run = Instant::now();
@@ -153,8 +181,10 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
     {
         let id = self.next_id;
         let (sx, mut rx) = mpsc::channel(10);
-        self.channels
-            .insert(id.0, (daemon.lock().await.name().await, sx));
+        self.channels.insert(
+            id.0,
+            DaemonHandle::new::<T>(daemon.lock().await.name().await, sx),
+        );
         let data = self.data.clone();
         tokio::spawn(async move {
             let mut last_run = Instant::now();
@@ -183,11 +213,11 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
     }
 
     /// List all names of all running daemons
-    pub fn daemon_names(&self) -> impl Iterator<Item = (usize, &str)> {
+    pub fn daemon_names(&self) -> impl Iterator<Item = (usize, &DaemonHandle)> {
         self.channels
             .iter()
-            .filter(|(_, (_, s))| !s.is_closed())
-            .map(|(i, (n, _))| (*i, n.as_str()))
+            .filter(|(_, dhandle)| !dhandle.ch.is_closed())
+            .map(|(i, dhandle)| (*i, dhandle))
     }
 
     /// Create a daemon thread, this doesn't start task, it simply converts the data object
