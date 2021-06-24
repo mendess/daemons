@@ -1,6 +1,6 @@
 [package]
 name = "daemons"
-version = "0.5.4"
+version = "0.5.5"
 authors = ["mendess <pedro.mendes.26@gmail.com>"]
 edition = "2018"
 
@@ -10,3 +10,4 @@ edition = "2018"
 async-trait = "0.1"
 futures = "0.3"
 tokio = { version = "1", features = ["time", "sync", "rt"] }
+log = "0.4"

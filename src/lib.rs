@@ -7,7 +7,7 @@ mod monomorphise;
 
 use futures::future::OptionFuture as OptFut;
 use std::{
-    any::TypeId,
+    any::{type_name, TypeId},
     collections::HashMap,
     num::Wrapping,
     sync::Arc,
@@ -96,7 +96,11 @@ impl DaemonHandle {
 
 impl<D: Send + Sync + 'static> DaemonManager<D> {
     async fn send_msg(&mut self, i: usize, msg: Msg) -> Result<(), usize> {
-        match OptFut::from(self.channels.get(&i).map(|dhandle| dhandle.ch.send(msg))).await {
+        let send_fut = self.channels.get(&i).map(|dhandle| {
+            log::trace!("Sending message {:?} to daemon {}", msg, dhandle.name);
+            dhandle.ch.send(msg)
+        });
+        match OptFut::from(send_fut).await {
             Some(Ok(_)) => Ok(()),
             e => {
                 if e.is_some() {
@@ -145,10 +149,11 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
     where
         T: Daemon<Data = D> + Send + Sync + 'static,
     {
+        let name = daemon.name().await;
+        log::trace!("Adding daemon {}({})", type_name::<T>(), name);
         let id = self.next_id;
         let (sx, mut rx) = mpsc::channel(10);
-        self.channels
-            .insert(id.0, DaemonHandle::new::<T>(daemon.name().await, sx));
+        self.channels.insert(id.0, DaemonHandle::new::<T>(name, sx));
         let data = self.data.clone();
         tokio::spawn(async move {
             let mut last_run = Instant::now();
@@ -179,12 +184,11 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
     where
         T: Daemon<Data = D> + Send + Sync + 'static,
     {
+        let name = daemon.lock().await.name().await;
+        log::trace!("Adding shared daemon {}({})", type_name::<T>(), name);
         let id = self.next_id;
         let (sx, mut rx) = mpsc::channel(10);
-        self.channels.insert(
-            id.0,
-            DaemonHandle::new::<T>(daemon.lock().await.name().await, sx),
-        );
+        self.channels.insert(id.0, DaemonHandle::new::<T>(name, sx));
         let data = self.data.clone();
         tokio::spawn(async move {
             let mut last_run = Instant::now();
