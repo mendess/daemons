@@ -97,7 +97,7 @@ impl DaemonHandle {
 impl<D: Send + Sync + 'static> DaemonManager<D> {
     async fn send_msg(&mut self, i: usize, msg: Msg) -> Result<(), usize> {
         let send_fut = self.channels.get(&i).map(|dhandle| {
-            log::trace!("Sending message {:?} to daemon {}", msg, dhandle.name);
+            log::trace!("Sending message {:?} to daemon '{}'", msg, dhandle.name);
             dhandle.ch.send(msg)
         });
         match OptFut::from(send_fut).await {
@@ -133,6 +133,7 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
 
     /// Run all daemons now
     pub async fn run_all(&mut self) {
+        log::trace!("Running all {} daemons", self.channels.len());
         let mut failed = Vec::new();
         for (i, dhandle) in self.channels.iter() {
             if let Err(_) = dhandle.ch.send(Msg::Run).await {
@@ -150,7 +151,7 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
         T: Daemon<Data = D> + Send + Sync + 'static,
     {
         let name = daemon.name().await;
-        log::trace!("Adding daemon {}({})", type_name::<T>(), name);
+        log::trace!("Adding daemon {}({:?})", type_name::<T>(), name);
         let id = self.next_id;
         let (sx, mut rx) = mpsc::channel(10);
         self.channels.insert(id.0, DaemonHandle::new::<T>(name, sx));
@@ -185,7 +186,7 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
         T: Daemon<Data = D> + Send + Sync + 'static,
     {
         let name = daemon.lock().await.name().await;
-        log::trace!("Adding shared daemon {}({})", type_name::<T>(), name);
+        log::trace!("Adding shared daemon {}({:?})", type_name::<T>(), name);
         let id = self.next_id;
         let (sx, mut rx) = mpsc::channel(10);
         self.channels.insert(id.0, DaemonHandle::new::<T>(name, sx));
