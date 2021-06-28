@@ -4,6 +4,7 @@
 #![deny(unused_must_use)]
 
 mod monomorphise;
+mod control_flow;
 
 use futures::future::OptionFuture as OptFut;
 use std::{
@@ -21,24 +22,7 @@ use tokio::{
     time::timeout,
 };
 
-/// Used to tell a daemon whether it has to quit or continue
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ControlFlow {
-    Continue,
-    Break,
-}
-
-impl ControlFlow {
-    /// Is break
-    pub fn is_break(self) -> bool {
-        self == ControlFlow::Break
-    }
-
-    /// Is continue
-    pub fn is_continue(self) -> bool {
-        !self.is_break()
-    }
-}
+pub use control_flow::ControlFlow;
 
 /// A Daemon, daemons run at specified intervals (or when asked to) until they return
 /// [ControlFlow::Break].
