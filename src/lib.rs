@@ -3,15 +3,18 @@
 #![deny(unsafe_code)]
 #![deny(unused_must_use)]
 
-mod monomorphise;
 mod control_flow;
+mod monomorphise;
 
 use futures::future::OptionFuture as OptFut;
 use std::{
     any::{type_name, TypeId},
     collections::HashMap,
     num::Wrapping,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tokio::{
@@ -50,6 +53,7 @@ pub struct DaemonManager<Data> {
     next_id: Wrapping<usize>,
     channels: HashMap<usize, DaemonHandle>,
     data: Arc<Data>,
+    needs_gc: AtomicBool,
 }
 
 /// A daemon handle, this will provide the name and the original type id of the associated daemon
@@ -80,6 +84,7 @@ impl DaemonHandle {
 
 impl<D: Send + Sync + 'static> DaemonManager<D> {
     async fn send_msg(&mut self, i: usize, msg: Msg) -> Result<(), usize> {
+        self.gc();
         let send_fut = self.channels.get(&i).map(|dhandle| {
             log::trace!("Sending message {:?} to daemon '{}'", msg, dhandle.name);
             dhandle.ch.send(msg)
@@ -92,6 +97,14 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
                 }
                 Err(i)
             }
+        }
+    }
+
+    #[inline(always)]
+    fn gc(&mut self) {
+        if self.needs_gc.load(Ordering::Relaxed) {
+            self.channels.retain(|_, v| !v.ch.is_closed());
+            self.needs_gc.store(false, Ordering::Relaxed);
         }
     }
 
@@ -127,6 +140,7 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
         failed.iter().for_each(|i| {
             self.channels.remove(&i);
         });
+        self.needs_gc.store(false, Ordering::Relaxed);
     }
 
     /// Start a new daemon
@@ -149,8 +163,7 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
                     .checked_sub(Instant::now() - last_run)
                     .unwrap_or_default();
                 match timeout(interval, rx.recv()).await {
-                    //TODO: or patterns
-                    Ok(Some(Msg::Cancel)) | Ok(None) => break,
+                    Ok(Some(Msg::Cancel) | None) => break,
                     Ok(Some(Msg::Run)) => (),
                     Err(_) => last_run = Instant::now(),
                 }
@@ -161,6 +174,7 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
             }
         });
         self.next_id += Wrapping(1);
+        self.gc();
         id.0
     }
 
@@ -198,6 +212,7 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
             }
         });
         self.next_id += Wrapping(1);
+        self.gc();
         id.0
     }
 
@@ -205,7 +220,14 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
     pub fn daemon_names(&self) -> impl Iterator<Item = (usize, &DaemonHandle)> {
         self.channels
             .iter()
-            .filter(|(_, dhandle)| !dhandle.ch.is_closed())
+            .filter(move |(_, dhandle)| {
+                if dhandle.ch.is_closed() {
+                    self.needs_gc.store(true, Ordering::Relaxed);
+                    false
+                } else {
+                    true
+                }
+            })
             .map(|(i, dhandle)| (*i, dhandle))
     }
 
@@ -222,6 +244,7 @@ impl<D: Send + Sync + 'static> From<Arc<D>> for DaemonManager<D> {
             next_id: Wrapping(0),
             channels: HashMap::new(),
             data,
+            needs_gc: AtomicBool::new(false),
         }
     }
 }
