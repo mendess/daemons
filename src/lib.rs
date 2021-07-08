@@ -6,6 +6,8 @@
 mod control_flow;
 mod monomorphise;
 
+pub use async_trait::async_trait;
+pub use control_flow::ControlFlow;
 use futures::future::OptionFuture as OptFut;
 use std::{
     any::{type_name, TypeId},
@@ -20,16 +22,14 @@ use std::{
 use tokio::{
     sync::{
         mpsc::{self, Sender},
-        Mutex,
+        Mutex, RwLock,
     },
     time::timeout,
 };
 
-pub use control_flow::ControlFlow;
-
 /// A Daemon, daemons run at specified intervals (or when asked to) until they return
 /// [ControlFlow::Break].
-#[async_trait::async_trait]
+#[async_trait]
 pub trait Daemon {
     type Data;
 
@@ -39,6 +39,44 @@ pub trait Daemon {
     async fn interval(&self) -> Duration;
     /// The name of the daemon
     async fn name(&self) -> String;
+}
+
+#[async_trait]
+impl<T> Daemon for Arc<Mutex<T>>
+where
+    T: Daemon + 'static + Send + Sync,
+    T::Data: Send + Sync,
+{
+    type Data = T::Data;
+
+    async fn run(&mut self, data: &Self::Data) -> ControlFlow {
+        self.lock().await.run(data).await
+    }
+    async fn interval(&self) -> Duration {
+        self.lock().await.interval().await
+    }
+    async fn name(&self) -> String {
+        self.lock().await.name().await
+    }
+}
+
+#[async_trait]
+impl<T> Daemon for Arc<RwLock<T>>
+where
+    T: Daemon + 'static + Send + Sync,
+    T::Data: Send + Sync,
+{
+    type Data = T::Data;
+
+    async fn run(&mut self, data: &Self::Data) -> ControlFlow {
+        self.write().await.run(data).await
+    }
+    async fn interval(&self) -> Duration {
+        self.read().await.interval().await
+    }
+    async fn name(&self) -> String {
+        self.read().await.name().await
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -53,7 +91,13 @@ pub struct DaemonManager<Data> {
     next_id: Wrapping<usize>,
     channels: HashMap<usize, DaemonHandle>,
     data: Arc<Data>,
-    needs_gc: AtomicBool,
+    needs_gc: Arc<AtomicBool>,
+}
+
+impl<Data> Drop for DaemonManager<Data> {
+    fn drop(&mut self) {
+        log::trace!("goodbye now");
+    }
 }
 
 /// A daemon handle, this will provide the name and the original type id of the associated daemon
@@ -154,60 +198,31 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
         let (sx, mut rx) = mpsc::channel(10);
         self.channels.insert(id.0, DaemonHandle::new::<T>(name, sx));
         let data = self.data.clone();
-        tokio::spawn(async move {
-            let mut last_run = Instant::now();
-            loop {
-                let interval = daemon
-                    .interval()
-                    .await
-                    .checked_sub(Instant::now() - last_run)
-                    .unwrap_or_default();
-                match timeout(interval, rx.recv()).await {
-                    Ok(Some(Msg::Cancel) | None) => break,
-                    Ok(Some(Msg::Run)) => (),
-                    Err(_) => last_run = Instant::now(),
-                }
+        tokio::spawn({
+            let needs_gc = self.needs_gc.clone();
+            async move {
+                let mut last_run = Instant::now();
+                loop {
+                    let interval = daemon
+                        .interval()
+                        .await
+                        .checked_sub(Instant::now() - last_run)
+                        .unwrap_or_default();
+                    log::trace!("interval selected: {:?}", interval);
+                    match timeout(interval, rx.recv()).await {
+                        Ok(Some(Msg::Cancel)) => break,
+                        Ok(None) => {
+                            tokio::time::sleep(interval).await;
+                            last_run = Instant::now();
+                        }
+                        Ok(Some(Msg::Run)) => (),
+                        Err(_) => last_run = Instant::now(),
+                    }
 
-                if daemon.run(&data).await.is_break() {
-                    break;
-                }
-            }
-        });
-        self.next_id += Wrapping(1);
-        self.gc();
-        id.0
-    }
-
-    /// Start a new daemon, that is wrapped in an `Arc<Mutex<>>`
-    pub async fn add_shared<T>(&mut self, daemon: Arc<Mutex<T>>) -> usize
-    where
-        T: Daemon<Data = D> + Send + Sync + 'static,
-    {
-        let name = daemon.lock().await.name().await;
-        log::trace!("Adding shared daemon {}({:?})", type_name::<T>(), name);
-        let id = self.next_id;
-        let (sx, mut rx) = mpsc::channel(10);
-        self.channels.insert(id.0, DaemonHandle::new::<T>(name, sx));
-        let data = self.data.clone();
-        tokio::spawn(async move {
-            let mut last_run = Instant::now();
-            loop {
-                let interval = daemon
-                    .lock()
-                    .await
-                    .interval()
-                    .await
-                    .checked_sub(Instant::now() - last_run)
-                    .unwrap_or_default();
-                match timeout(interval, rx.recv()).await {
-                    //TODO: or patterns
-                    Ok(Some(Msg::Cancel)) | Ok(None) => break,
-                    Ok(Some(Msg::Run)) => (),
-                    Err(_) => last_run = Instant::now(),
-                }
-
-                if daemon.lock().await.run(&data).await.is_break() {
-                    break;
+                    if daemon.run(&data).await.is_break() {
+                        needs_gc.store(true, Ordering::Relaxed);
+                        break;
+                    }
                 }
             }
         });
@@ -244,7 +259,36 @@ impl<D: Send + Sync + 'static> From<Arc<D>> for DaemonManager<D> {
             next_id: Wrapping(0),
             channels: HashMap::new(),
             data,
-            needs_gc: AtomicBool::new(false),
+            needs_gc: Default::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[test]
+    fn shared() {
+        struct Foo;
+        #[async_trait::async_trait]
+        impl Daemon for Foo {
+            type Data = ();
+            async fn name(&self) -> String {
+                "ola".into()
+            }
+
+            async fn interval(&self) -> Duration {
+                Duration::default()
+            }
+
+            async fn run(&mut self, _: &Self::Data) -> ControlFlow {
+                ControlFlow::BREAK
+            }
+        }
+
+        let _ = DaemonManager::from(Arc::new(())).add_daemon(Arc::new(Mutex::new(Foo)));
     }
 }
