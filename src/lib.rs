@@ -94,12 +94,6 @@ pub struct DaemonManager<Data> {
     needs_gc: Arc<AtomicBool>,
 }
 
-impl<Data> Drop for DaemonManager<Data> {
-    fn drop(&mut self) {
-        log::trace!("goodbye now");
-    }
-}
-
 /// A daemon handle, this will provide the name and the original type id of the associated daemon
 #[derive(Debug)]
 pub struct DaemonHandle {
@@ -208,7 +202,6 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
                         .await
                         .checked_sub(Instant::now() - last_run)
                         .unwrap_or_default();
-                    log::trace!("interval selected: {:?}", interval);
                     match timeout(interval, rx.recv()).await {
                         Ok(Some(Msg::Cancel)) => break,
                         Ok(None) => {
