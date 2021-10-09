@@ -1,5 +1,6 @@
 use daemons::*;
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration, time::Instant};
+use chrono::Utc;
 
 struct Foo(i32);
 
@@ -15,9 +16,9 @@ impl Daemon for Foo {
     }
 
     async fn run(&mut self, _: &Self::Data) -> ControlFlow {
-        println!("ola");
+        println!("{:?} ola", Utc::now());
         self.0 += 1;
-        if self.0 == 3 {
+        if self.0 == 10 {
             ControlFlow::BREAK
         } else {
             ControlFlow::CONTINUE

@@ -1,6 +1,6 @@
 [package]
 name = "daemons"
-version = "0.7.0"
+version = "0.7.1"
 authors = ["mendess <pedro.mendes.26@gmail.com>"]
 edition = "2018"
 
@@ -15,3 +15,4 @@ log = "0.4"
 [dev-dependencies]
 tokio = { version = "1", features = ["time", "sync", "rt-multi-thread", "macros"] }
 simple_logger = "1"
+chrono = "0.4.19"

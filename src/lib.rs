@@ -171,12 +171,12 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
         log::trace!("Running all {} daemons", self.channels.len());
         let mut failed = Vec::new();
         for (i, dhandle) in self.channels.iter() {
-            if let Err(_) = dhandle.ch.send(Msg::Run).await {
+            if dhandle.ch.send(Msg::Run).await.is_err() {
                 failed.push(*i)
             }
         }
         failed.iter().for_each(|i| {
-            self.channels.remove(&i);
+            self.channels.remove(i);
         });
         self.needs_gc.store(false, Ordering::Relaxed);
     }
@@ -190,26 +190,37 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
         log::trace!("Adding daemon {}({:?})", type_name::<T>(), name);
         let id = self.next_id;
         let (sx, mut rx) = mpsc::channel(10);
-        self.channels.insert(id.0, DaemonHandle::new::<T>(name, sx));
+        self.channels.insert(id.0, DaemonHandle::new::<T>(name.clone(), sx));
         let data = self.data.clone();
         tokio::spawn({
             let needs_gc = self.needs_gc.clone();
             async move {
                 let mut last_run = Instant::now();
                 loop {
-                    let interval = daemon
-                        .interval()
-                        .await
-                        .checked_sub(Instant::now() - last_run)
-                        .unwrap_or_default();
-                    match timeout(interval, rx.recv()).await {
-                        Ok(Some(Msg::Cancel)) => break,
-                        Ok(None) => {
-                            tokio::time::sleep(interval).await;
-                            last_run = Instant::now();
+                    let interval = daemon.interval().await;
+                    let now = Instant::now();
+                    let interval = interval.checked_sub(now - last_run).unwrap_or_default();
+                    let mut loop_count = 0;
+                    while let Some(time_left) = interval.checked_sub(now.elapsed()) {
+                        if loop_count > 0 {
+                            log::trace!(
+                                "Daemon {}({:?}) finished sleeping with {:?} time left. loop count: {}",
+                                type_name::<T>(),
+                                name,
+                                time_left,
+                                loop_count
+                            );
                         }
-                        Ok(Some(Msg::Run)) => (),
-                        Err(_) => last_run = Instant::now(),
+                        match timeout(time_left, rx.recv()).await {
+                            Ok(Some(Msg::Cancel)) => break,
+                            Ok(None) => {
+                                tokio::time::sleep(interval).await;
+                                last_run = Instant::now();
+                            }
+                            Ok(Some(Msg::Run)) => (),
+                            Err(_) => last_run = Instant::now(),
+                        }
+                        loop_count += 1;
                     }
 
                     if daemon.run(&data).await.is_break() {
