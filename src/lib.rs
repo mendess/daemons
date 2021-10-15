@@ -29,8 +29,10 @@ use tokio::{
 
 /// A Daemon, daemons run at specified intervals (or when asked to) until they return
 /// [ControlFlow::Break].
+///
+/// COMPENSATE_INTERVAL: Whether the value returned from the interval should have run time subtracted
 #[async_trait]
-pub trait Daemon {
+pub trait Daemon<const COMPENSATE_INTERVAL: bool> {
     type Data;
 
     /// What the daemon does when it runs
@@ -42,9 +44,9 @@ pub trait Daemon {
 }
 
 #[async_trait]
-impl<T> Daemon for Arc<Mutex<T>>
+impl<T, const C: bool> Daemon<C> for Arc<Mutex<T>>
 where
-    T: Daemon + 'static + Send + Sync,
+    T: Daemon<C> + 'static + Send + Sync,
     T::Data: Send + Sync,
 {
     type Data = T::Data;
@@ -61,9 +63,9 @@ where
 }
 
 #[async_trait]
-impl<T> Daemon for Arc<RwLock<T>>
+impl<T, const C: bool> Daemon<C> for Arc<RwLock<T>>
 where
-    T: Daemon + 'static + Send + Sync,
+    T: Daemon<C> + 'static + Send + Sync,
     T::Data: Send + Sync,
 {
     type Data = T::Data;
@@ -182,24 +184,27 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
     }
 
     /// Start a new daemon
-    pub async fn add_daemon<T>(&mut self, mut daemon: T) -> usize
+    pub async fn add_daemon<T, const COMPENSATE: bool>(&mut self, mut daemon: T) -> usize
     where
-        T: Daemon<Data = D> + Send + Sync + 'static,
+        T: Daemon<COMPENSATE, Data = D> + Send + Sync + 'static,
     {
         let name = daemon.name().await;
         log::trace!("Adding daemon {}({:?})", type_name::<T>(), name);
         let id = self.next_id;
         let (sx, mut rx) = mpsc::channel(10);
-        self.channels.insert(id.0, DaemonHandle::new::<T>(name.clone(), sx));
+        self.channels
+            .insert(id.0, DaemonHandle::new::<T>(name.clone(), sx));
         let data = self.data.clone();
         tokio::spawn({
             let needs_gc = self.needs_gc.clone();
             async move {
                 let mut last_run = Instant::now();
                 loop {
-                    let interval = daemon.interval().await;
+                    let mut interval = daemon.interval().await;
                     let now = Instant::now();
-                    let interval = interval.checked_sub(now - last_run).unwrap_or_default();
+                    if COMPENSATE {
+                        interval = interval.saturating_sub(now - last_run);
+                    }
                     let mut loop_count = 0;
                     while let Some(time_left) = interval.checked_sub(now.elapsed()) {
                         if loop_count > 0 {
@@ -213,12 +218,15 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
                         }
                         match timeout(time_left, rx.recv()).await {
                             Ok(Some(Msg::Cancel)) => break,
+                            Ok(Some(Msg::Run)) => (),
                             Ok(None) => {
                                 tokio::time::sleep(interval).await;
-                                last_run = Instant::now();
+                                if COMPENSATE {
+                                    last_run = Instant::now();
+                                }
                             }
-                            Ok(Some(Msg::Run)) => (),
-                            Err(_) => last_run = Instant::now(),
+                            Err(_) if COMPENSATE => last_run = Instant::now(),
+                            Err(_) => {}
                         }
                         loop_count += 1;
                     }
@@ -278,7 +286,7 @@ mod test {
     fn shared() {
         struct Foo;
         #[async_trait::async_trait]
-        impl Daemon for Foo {
+        impl Daemon<false> for Foo {
             type Data = ();
             async fn name(&self) -> String {
                 "ola".into()
