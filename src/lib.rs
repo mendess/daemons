@@ -217,7 +217,7 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
                             );
                         }
                         match timeout(time_left, rx.recv()).await {
-                            Ok(Some(Msg::Cancel)) => break,
+                            Ok(Some(Msg::Cancel)) => return,
                             Ok(Some(Msg::Run)) => (),
                             Ok(None) => {
                                 tokio::time::sleep(interval).await;
