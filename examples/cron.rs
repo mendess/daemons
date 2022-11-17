@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 struct Foo;
 
 #[daemons::async_trait]
-impl Daemon for Foo {
+impl Daemon<false> for Foo {
     type Data = ();
     async fn run(&mut self, _: &Self::Data) -> ControlFlow {
         log::info!("{:?} ola", Utc::now());
@@ -18,10 +18,13 @@ impl Daemon for Foo {
         let next_second = now_zero_nano.time() + chrono::Duration::seconds(1);
         let mut target = NaiveDateTime::new(now.date(), next_second);
         if now > target {
-            target = NaiveDateTime::new(target.date().succ(), next_second);
+            target = NaiveDateTime::new(
+                target.date().succ_opt().expect("not reach the end of time"),
+                next_second,
+            );
         }
-        let dur = (target - now).to_std().unwrap_or_default();
-        dur
+
+        (target - now).to_std().unwrap_or_default()
     }
 
     async fn name(&self) -> String {

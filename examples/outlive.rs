@@ -1,11 +1,11 @@
-use daemons::*;
-use std::{sync::Arc, time::Duration, time::Instant};
 use chrono::Utc;
+use daemons::*;
+use std::{sync::Arc, time::Duration};
 
 struct Foo(i32);
 
 #[daemons::async_trait]
-impl Daemon for Foo {
+impl Daemon<false> for Foo {
     type Data = ();
     async fn name(&self) -> String {
         "ola".into()
@@ -28,7 +28,10 @@ impl Daemon for Foo {
 
 #[tokio::main]
 async fn main() {
-    simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Trace).init().unwrap();
+    simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Trace)
+        .init()
+        .unwrap();
     {
         let mut mng = DaemonManager::from(Arc::new(()));
         mng.add_daemon(Foo(0)).await; // thread::spawn

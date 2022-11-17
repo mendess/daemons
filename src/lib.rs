@@ -1,4 +1,3 @@
-#![deny(unused_crate_dependencies)]
 #![deny(rust_2018_idioms)]
 #![deny(unsafe_code)]
 #![deny(unused_must_use)]
@@ -184,63 +183,32 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
     }
 
     /// Start a new daemon
-    pub async fn add_daemon<T, const COMPENSATE: bool>(&mut self, mut daemon: T) -> usize
+    pub async fn add_daemon<T, const COMPENSATE: bool>(&mut self, daemon: T) -> usize
     where
         T: Daemon<COMPENSATE, Data = D> + Send + Sync + 'static,
     {
         let name = daemon.name().await;
         log::trace!("Adding daemon {}({:?})", type_name::<T>(), name);
         let id = self.next_id;
-        let (sx, mut rx) = mpsc::channel(10);
-        self.channels
-            .insert(id.0, DaemonHandle::new::<T>(name.clone(), sx));
-        let data = self.data.clone();
-        tokio::spawn({
-            let needs_gc = self.needs_gc.clone();
-            async move {
-                let mut last_run = Instant::now();
-                loop {
-                    let mut interval = daemon.interval().await;
-                    let now = Instant::now();
-                    if COMPENSATE {
-                        interval = interval.saturating_sub(now - last_run);
-                    }
-                    let mut loop_count = 0;
-                    while let Some(time_left) = interval.checked_sub(now.elapsed()) {
-                        if loop_count > 0 {
-                            log::trace!(
-                                "Daemon {}({:?}) finished sleeping with {:?} time left. loop count: {}",
-                                type_name::<T>(),
-                                name,
-                                time_left,
-                                loop_count
-                            );
-                        }
-                        match timeout(time_left, rx.recv()).await {
-                            Ok(Some(Msg::Cancel)) => return,
-                            Ok(Some(Msg::Run)) => (),
-                            Ok(None) => {
-                                tokio::time::sleep(interval).await;
-                                if COMPENSATE {
-                                    last_run = Instant::now();
-                                }
-                            }
-                            Err(_) if COMPENSATE => last_run = Instant::now(),
-                            Err(_) => {}
-                        }
-                        loop_count += 1;
-                    }
-
-                    if daemon.run(&data).await.is_break() {
-                        needs_gc.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                }
-            }
-        });
+        tokio::task::Builder::new()
+            .name(&format!("daemon-({name})"))
+            .spawn(daemon_task(
+                self.needs_gc.clone(),
+                daemon,
+                self.add_channel::<T>(id.0, &name),
+                self.data.clone(),
+            ))
+            .expect("failed to spawn daemon");
         self.next_id += Wrapping(1);
         self.gc();
         id.0
+    }
+
+    fn add_channel<T: 'static>(&mut self, id: usize, name: &str) -> mpsc::Receiver<Msg> {
+        let (sx, rx) = mpsc::channel(10);
+        self.channels
+            .insert(id, DaemonHandle::new::<T>(name.into(), sx));
+        rx
     }
 
     /// List all names of all running daemons
@@ -272,6 +240,54 @@ impl<D: Send + Sync + 'static> From<Arc<D>> for DaemonManager<D> {
             channels: HashMap::new(),
             data,
             needs_gc: Default::default(),
+        }
+    }
+}
+
+async fn daemon_task<const COMPENSATE: bool, T>(
+    needs_gc: Arc<AtomicBool>,
+    mut daemon: T,
+    mut rx: mpsc::Receiver<Msg>,
+    data: Arc<T::Data>,
+) where
+    T: Daemon<COMPENSATE>,
+{
+    let mut last_run = Instant::now();
+    loop {
+        let mut interval = daemon.interval().await;
+        let now = Instant::now();
+        if COMPENSATE {
+            interval = interval.saturating_sub(now - last_run);
+        }
+        let mut loop_count = 0;
+        while let Some(time_left) = interval.checked_sub(now.elapsed()) {
+            if loop_count > 0 {
+                log::trace!(
+                    "Daemon {}({:?}) finished sleeping with {:?} time left. loop count: {}",
+                    type_name::<T>(),
+                    daemon.name().await,
+                    time_left,
+                    loop_count
+                );
+            }
+            match timeout(time_left, rx.recv()).await {
+                Ok(Some(Msg::Cancel)) => return,
+                Ok(Some(Msg::Run)) => (),
+                Ok(None) => {
+                    tokio::time::sleep(interval).await;
+                    if COMPENSATE {
+                        last_run = Instant::now();
+                    }
+                }
+                Err(_) if COMPENSATE => last_run = Instant::now(),
+                Err(_) => {}
+            }
+            loop_count += 1;
+        }
+
+        if daemon.run(&data).await.is_break() {
+            needs_gc.store(true, Ordering::Relaxed);
+            break;
         }
     }
 }
