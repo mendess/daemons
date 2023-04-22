@@ -1,8 +1,13 @@
 #![deny(rust_2018_idioms)]
 #![deny(unsafe_code)]
 #![deny(unused_must_use)]
+#![deny(missing_docs)]
+
+//! An implementation of background tasks.
 
 mod control_flow;
+#[cfg(feature = "cron")]
+pub mod cron;
 mod monomorphise;
 
 pub use async_trait::async_trait;
@@ -29,9 +34,14 @@ use tokio::{
 /// A Daemon, daemons run at specified intervals (or when asked to) until they return
 /// [ControlFlow::Break].
 ///
-/// COMPENSATE_INTERVAL: Whether the value returned from the interval should have run time subtracted
+/// COMPENSATE_INTERVAL: Whether the value returned from the interval should have the tasks run
+/// time subtracted from it.
+///
+/// # Note:
+/// Long running tasks can delay other tasks from being run.
 #[async_trait]
 pub trait Daemon<const COMPENSATE_INTERVAL: bool> {
+    /// Context data that will be passed to every task but will not be cloned.
     type Data;
 
     /// What the daemon does when it runs
@@ -112,10 +122,12 @@ impl DaemonHandle {
         }
     }
 
+    /// The name of the daemon.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// The typeId of the daemon.
     pub fn ty(&self) -> TypeId {
         self.ty
     }
@@ -190,15 +202,12 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
         let name = daemon.name().await;
         log::trace!("Adding daemon {}({:?})", type_name::<T>(), name);
         let id = self.next_id;
-        tokio::task::Builder::new()
-            .name(&format!("daemon-({name})"))
-            .spawn(daemon_task(
-                self.needs_gc.clone(),
-                daemon,
-                self.add_channel::<T>(id.0, &name),
-                self.data.clone(),
-            ))
-            .expect("failed to spawn daemon");
+        tokio::spawn(daemon_task(
+            self.needs_gc.clone(),
+            daemon,
+            self.add_channel::<T>(id.0, &name),
+            self.data.clone(),
+        ));
         self.next_id += Wrapping(1);
         self.gc();
         id.0
@@ -226,8 +235,7 @@ impl<D: Send + Sync + 'static> DaemonManager<D> {
             .map(|(i, dhandle)| (*i, dhandle))
     }
 
-    /// Create a daemon thread, this doesn't start task, it simply converts the data object
-    /// into a [Self]
+    /// Create a daemon thread with the passed `data`.
     pub fn spawn(data: Arc<D>) -> Self {
         data.into()
     }
